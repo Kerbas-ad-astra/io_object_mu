@@ -23,9 +23,12 @@ import bpy, bmesh
 from bpy_extras.object_utils import object_data_add
 from mathutils import Vector,Matrix,Quaternion
 from pprint import pprint
+from bpy_extras.io_utils import ExportHelper
+from bpy.props import BoolProperty, FloatProperty, StringProperty, EnumProperty
+from bpy.props import FloatVectorProperty, PointerProperty
 
 from .mu import MuEnum, Mu, MuColliderMesh, MuColliderSphere, MuColliderCapsule
-from .mu import MuObject, MuTransform, MuMesh, MuTagLayer, MuRenderer
+from .mu import MuObject, MuTransform, MuMesh, MuTagLayer, MuRenderer, MuLight
 from .mu import MuColliderBox, MuColliderWheel, MuMaterial, MuTexture, MuMatTex
 from .mu import MuSpring, MuFriction
 from .mu import MuAnimation, MuClip, MuCurve, MuKey
@@ -309,7 +312,7 @@ def make_renderer(mu, mesh):
             rend.materials.append(mu.materials[mat.name].index)
     return rend
 
-def make_light(mu, light):
+def make_light(mu, light, obj):
     mulight = MuLight()
     mulight.type = ('SPOT', 'SUN', 'POINT', 'AREA').index(light.type)
     mulight.color = tuple(light.color) + (1.0,)
@@ -320,6 +323,16 @@ def make_light(mu, light):
     if light.type == 'SPOT':
         mulight.spotAngle = light.spot_size * 180 / pi
     return mulight
+
+light_types = {
+    bpy.types.PointLamp,
+    bpy.types.SunLamp,
+    bpy.types.SpotLamp,
+    bpy.types.HemiLamp,
+    bpy.types.AreaLamp
+}
+
+exportable_types = {bpy.types.Mesh} | light_types
 
 def make_obj(mu, obj, path = ""):
     muobj = MuObject()
@@ -337,23 +350,19 @@ def make_obj(mu, obj, path = ""):
         if type(obj.data) == bpy.types.Mesh:
             muobj.shared_mesh = make_mesh(mu, obj)
             muobj.renderer = make_renderer(mu, obj.data)
-        elif type(obj.data) in [bpy.types.PointLamp,
-                                bpy.types.SunLamp,
-                                bpy.types.SpotLamp,
-                                bpy.types.HemiLamp,
-                                bpy.types.AreaLamp]:
-            muobj.light = make_light(mu, obj.data)
+        elif type(obj.data) in light_types:
+            muobj.light = make_light(mu, obj.data, obj)
             # Blender points spotlights along local -Z, unity along local +Z
             # which is Blender's +Y, so rotate -90 degrees around local X to
             # go from Blender to Unity
             rot = Quaternion((0.5**0.5,-0.5**0.5,0,0))
-            muobj.transform = rot * muobj.transform
+            muobj.transform.localRotation = rot * muobj.transform.localRotation
     for o in obj.children:
         muprops = o.muproperties
         if muprops.collider and muprops.collider != 'MU_COL_NONE':
             muobj.collider = make_collider(mu, o)
             continue
-        if (o.data and type(o.data) != bpy.types.Mesh):
+        if (o.data and type(o.data) not in exportable_types):
             continue
         muobj.children.append(make_obj(mu, o, path))
     return muobj
@@ -400,6 +409,7 @@ def make_key(key, mult):
     fps = bpy.context.scene.render.fps
     mukey = MuKey()
     x, y = key.co
+    x -= bpy.context.scene.frame_start
     mukey.time = x / fps
     mukey.value = y * mult
     dx, dy = key.handle_left
@@ -464,8 +474,7 @@ def make_animations(mu, animations, anim_root):
         anim.clips.append(clip)
     return anim
 
-def export_mu(operator, context, filepath):
-    obj = context.active_object
+def export_object(obj, filepath):
     animations = collect_animations(obj)
     anim_root = find_path_root(animations)
     mu = Mu()
@@ -481,4 +490,61 @@ def export_mu(operator, context, filepath):
         anim_root_obj = mu.objects[anim_root]
         anim_root_obj.animation = make_animations(mu, animations, anim_root)
     mu.write(filepath)
+    return mu
+
+def export_mu(operator, context, filepath):
+    export_object (context.active_object, filepath)
     return {'FINISHED'}
+
+class ExportMu(bpy.types.Operator, ExportHelper):
+    '''Save a KSP Mu (.mu) File'''
+    bl_idname = "export_object.ksp_mu"
+    bl_label = "Export Mu"
+
+    filename_ext = ".mu"
+    filter_glob = StringProperty(default="*.mu", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object != None
+                and (not context.active_object.data
+                     or type(context.active_object.data) == bpy.types.Mesh))
+
+    def execute(self, context):
+        keywords = self.as_keywords (ignore=("check_existing", "filter_glob"))
+        return export_mu(self, context, **keywords)
+
+class ExportMu_quick(bpy.types.Operator, ExportHelper):
+    '''Save a KSP Mu (.mu) File, defaulting name to selected object'''
+    bl_idname = "export_object.ksp_mu_quick"
+    bl_label = "Export Mu (quick)"
+
+    filename_ext = ".mu"
+    filter_glob = StringProperty(default="*.mu", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object != None
+                and (not context.active_object.data
+                     or type(context.active_object.data) == bpy.types.Mesh))
+
+    def execute(self, context):
+        keywords = self.as_keywords (ignore=("check_existing", "filter_glob"))
+        return export_mu(self, context, **keywords)
+
+    def invoke(self, context, event):
+        if context.active_object != None:
+            self.filepath = context.active_object.name + self.filename_ext
+        return ExportHelper.invoke(self, context, event)
+
+class VIEW3D_PT_tools_mu_export(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TOOLS'
+    bl_category = "Mu Tools"
+    bl_context = "objectmode"
+    bl_label = "Export Mu"
+
+    def draw(self, context):
+        layout = self.layout
+        #col = layout.column(align=True)
+        layout.operator("export_object.ksp_mu_quick", text = "Export Mu Model");

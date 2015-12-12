@@ -26,6 +26,9 @@ from math import pi, sqrt
 import bpy
 from bpy_extras.object_utils import object_data_add
 from mathutils import Vector,Matrix,Quaternion
+from bpy_extras.io_utils import ImportHelper
+from bpy.props import BoolProperty, FloatProperty, StringProperty, EnumProperty
+from bpy.props import FloatVectorProperty, PointerProperty
 
 from .mu import MuEnum, Mu, MuColliderMesh, MuColliderSphere, MuColliderCapsule
 from .mu import MuColliderBox, MuColliderWheel
@@ -99,24 +102,21 @@ def create_light(mu, mulight, transform):
     return obj
 
 property_map = {
-    "m_LocalPosition.x": ("location", 0, 1),
-    "m_LocalPosition.y": ("location", 2, 1),
-    "m_LocalPosition.z": ("location", 1, 1),
-    "m_LocalRotation.x": ("rotation_quaternion", 1, -1),
-    "m_LocalRotation.y": ("rotation_quaternion", 3, -1),
-    "m_LocalRotation.z": ("rotation_quaternion", 2, -1),
-    "m_LocalRotation.w": ("rotation_quaternion", 0, 1),
-    "m_LocalScale.x": ("scale", 0, 1),
-    "m_LocalScale.y": ("scale", 2, 1),
-    "m_LocalScale.z": ("scale", 1, 1),
+    "m_LocalPosition.x": ("obj", "location", 0, 1),
+    "m_LocalPosition.y": ("obj", "location", 2, 1),
+    "m_LocalPosition.z": ("obj", "location", 1, 1),
+    "m_LocalRotation.x": ("obj", "rotation_quaternion", 1, -1),
+    "m_LocalRotation.y": ("obj", "rotation_quaternion", 3, -1),
+    "m_LocalRotation.z": ("obj", "rotation_quaternion", 2, -1),
+    "m_LocalRotation.w": ("obj", "rotation_quaternion", 0, 1),
+    "m_LocalScale.x": ("obj", "scale", 0, 1),
+    "m_LocalScale.y": ("obj", "scale", 2, 1),
+    "m_LocalScale.z": ("obj", "scale", 1, 1),
+    "m_Intensity": ("data", "energy", 0, 1),
 }
 
-def create_fcurve(action, curve):
-    try:
-        dp, ind, mult = property_map[curve.property]
-    except KeyError:
-        print("%s: Unknown property: %s" % (curve.path, curve.property))
-        return False
+def create_fcurve(action, curve, propmap):
+    dp, ind, mult = propmap
     fps = bpy.context.scene.render.fps
     fc = action.fcurves.new(data_path = dp, index = ind)
     fc.keyframe_points.add(len(curve.keys))
@@ -146,18 +146,29 @@ def create_action(mu, path, clip):
         if not curve.path:
             #FIXME need to look into this more as I'm not sure if the animation
             # is broken or if the property is somewhere weird
+            print("Empty path for %s", clip.name)
             continue
-        name = ".".join([clip.name, curve.path])
+
+        mu_path = "/".join([path, curve.path])
+        if mu_path not in mu.objects:
+            print("Unknown path: %s" % (mu_path))
+            continue
+        obj = mu.objects[mu_path]
+
+        if curve.property not in property_map:
+            print("%s: Unknown property: %s" % (curve.path, curve.property))
+            continue
+        propmap = property_map[curve.property]
+        subpath, propmap = propmap[0], propmap[1:]
+
+        if subpath != "obj":
+            obj = getattr (obj, subpath)
+
+        name = ".".join([clip.name, curve.path, subpath])
         if name not in actions:
-            mu_path = "/".join([path, curve.path])
-            try:
-                obj = mu.objects[mu_path]
-            except KeyError:
-                print("Unknown path: %s" % (mu_path))
-                continue
             actions[name] = bpy.data.actions.new(name), obj
         act, obj = actions[name]
-        if not create_fcurve(act, curve):
+        if not create_fcurve(act, curve, propmap):
             continue
     for name in actions:
         act, obj = actions[name]
@@ -173,15 +184,8 @@ def create_collider(mu, muobj):
     if type(col) == MuColliderMesh:
         name = name + ".collider"
         mesh = create_mesh(mu, col.mesh, name)
-    elif type(col) == MuColliderSphere:
-        mesh = collider.sphere(name, col.center, col.radius)
-    elif type(col) == MuColliderCapsule:
-        mesh = collider.capsule(name, col.center, col.radius, col.height,
-                                col.direction)
-    elif type(col) == MuColliderBox:
-        mesh = collider.box(name, col.center, col.size)
-    elif type(col) == MuColliderWheel:
-        mesh = collider.wheel(name, col.center, col.radius)
+    else:
+        mesh = bpy.data.meshes.new(name)
     obj = create_mesh_object(name, mesh, None)
 
     obj.muproperties.isTrigger = False
@@ -190,27 +194,30 @@ def create_collider(mu, muobj):
     if type(col) == MuColliderMesh:
         obj.muproperties.collider = 'MU_COL_MESH'
     elif type(col) == MuColliderSphere:
-        obj.muproperties.collider = 'MU_COL_SPHERE'
         obj.muproperties.radius = col.radius
         obj.muproperties.center = col.center
+        obj.muproperties.collider = 'MU_COL_SPHERE'
     elif type(col) == MuColliderCapsule:
-        obj.muproperties.collider = 'MU_COL_CAPSULE'
         obj.muproperties.radius = col.radius
         obj.muproperties.height = col.height
         obj.muproperties.direction = properties.dir_map[col.direction]
         obj.muproperties.center = col.center
+        obj.muproperties.collider = 'MU_COL_CAPSULE'
     elif type(col) == MuColliderBox:
-        obj.muproperties.collider = 'MU_COL_BOX'
         obj.muproperties.size = col.size
         obj.muproperties.center = col.center
+        obj.muproperties.collider = 'MU_COL_BOX'
     elif type(col) == MuColliderWheel:
-        obj.muproperties.collider = 'MU_COL_WHEEL'
         obj.muproperties.radius = col.radius
         obj.muproperties.suspensionDistance = col.suspensionDistance
         obj.muproperties.center = col.center
+        obj.muproperties.mass = col.mass
         copy_spring(obj.muproperties.suspensionSpring, col.suspensionSpring)
         copy_friction(obj.muproperties.forwardFriction, col.forwardFriction)
         copy_friction(obj.muproperties.sideFriction, col.sidewaysFriction)
+        obj.muproperties.collider = 'MU_COL_WHEEL'
+    if type(col) != MuColliderMesh:
+        collider.build_collider(obj)
     return obj
 
 def create_object(mu, muobj, parent, create_colliders, parents):
@@ -221,6 +228,14 @@ def create_object(mu, muobj, parent, create_colliders, parents):
         for poly in mesh.polygons:
             poly.use_smooth = True
         obj = create_mesh_object(muobj.transform.name, mesh, muobj.transform)
+    elif hasattr(muobj, "skinned_mesh_renderer"):
+        smr = muobj.skinned_mesh_renderer
+        mesh = create_mesh(mu, smr.mesh, muobj.transform.name)
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+        obj = create_mesh_object(muobj.transform.name, mesh, muobj.transform)
+        mumat = mu.materials[smr.materials[0]]
+        mesh.materials.append(mumat.material)
     if hasattr(muobj, "renderer"):
         if mesh:
             mumat = mu.materials[muobj.renderer.materials[0]]
@@ -284,7 +299,21 @@ def load_mbm(mbmpath):
 
 def load_image(name, path):
     if name[-4:].lower() in [".dds", ".png", ".tga"]:
-        bpy.data.images.load(os.path.join(path, name))
+        img = bpy.data.images.load(os.path.join(path, name))
+        if name[-4:].lower() == ".dds":
+            pixels = list(img.pixels[:])
+            rowlen = img.size[0] * 4
+            height = img.size[1]
+            for y in range(int(height/2)):
+                ind1 = y * rowlen
+                ind2 = (height - 1 - y) * rowlen
+                t = pixels[ind1 : ind1 + rowlen]
+                pixels[ind1:ind1+rowlen] = pixels[ind2:ind2+rowlen]
+                pixels[ind2:ind2+rowlen] = t
+            if name[-6:-4] == "_n":
+                pixels = convert_bump(pixels, img.size[0], height)
+            img.pixels = pixels[:]
+            img.pack(True)
     elif name[-4:].lower() == ".mbm":
         w,h, pixels = load_mbm(os.path.join(path, name))
         img = bpy.data.images.new(name, w, h)
@@ -353,3 +382,21 @@ def import_mu(self, context, filepath, create_colliders):
 
     bpy.context.user_preferences.edit.use_global_undo = undo
     return {'FINISHED'}
+
+class ImportMu(bpy.types.Operator, ImportHelper):
+    '''Load a KSP Mu (.mu) File'''
+    bl_idname = "import_object.ksp_mu"
+    bl_label = "Import Mu"
+    bl_description = """Import a KSP .mu model."""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filename_ext = ".mu"
+    filter_glob = StringProperty(default="*.mu", options={'HIDDEN'})
+
+    create_colliders = BoolProperty(name="Create Colliders",
+            description="Disable to import only visual and hierarchy elements",
+                                    default=True)
+
+    def execute(self, context):
+        keywords = self.as_keywords (ignore=("filter_glob",))
+        return import_mu(self, context, **keywords)
